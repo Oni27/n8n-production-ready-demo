@@ -1,0 +1,23 @@
+{
+  "event_id": "evt_2026_11_15_0003",
+  "event_type": "order.created",
+  "occurred_at": "2026-11-15T10:00:00Z",
+  "order_id": "ORD-RATE-2002",
+  "currency": "EUR",
+  "customer": {
+    "id": "cus_42",
+    "email": "jane@example.com"
+  },
+  "lines": [
+    {
+      "sku": "MUG-01",
+      "quantity": 2,
+      "unit_price": "12.50"
+    },
+    {
+      "sku": "TEE-L",
+      "quantity": 1,
+      "unit_price": "20.00"
+    }
+  ]
+}

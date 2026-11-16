@@ -1,0 +1,524 @@
+{
+  "name": "Order Intake - production-ready demo",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "order-intake",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "e4a9d0c0-c426-59ad-945f-4e62f67e8616",
+      "name": "Webhook: Order Intake",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "aa2242a2-14e5-5d3f-a12a-91fa395cf300"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Structured log helper: one JSON line to stdout (visible in n8n logs when\n// CODE_ENABLE_STDOUT=true) and the same entry appended to item.logs so it is\n// also visible in the execution view.\nfunction log(item, step, outcome, extra = {}, level = 'info') {\n  const entry = {\n    ts: new Date().toISOString(),\n    level,\n    workflow: 'order-intake',\n    execution_id: $execution.id,\n    correlation_id: item.correlationId,\n    step,\n    outcome,\n    ...extra,\n  };\n  console.log(JSON.stringify(entry));\n  item.logs = [...(item.logs || []), entry];\n  return item;\n}\n\n// ---- Configuration: edit these values after import (no secrets here) ----\nconst CONFIG = {\n  downstreamUrl: 'http://mock-api:8081/orders',     // the system you deliver to\n  alertWebhookUrl: 'http://mock-api:8081/alerts',   // Slack/Teams/any generic webhook\n  maxAttempts: 4,                                   // total attempts, including the first\n  backoffBaseSeconds: 1,                            // 1s, 2s, 4s ... (with jitter)\n  backoffMaxSeconds: 16,                            // cap per wait\n};\n\nconst headers = $json.headers || {};\nconst item = {\n  config: CONFIG,\n  correlationId: headers['x-correlation-id'] || `n8n-${$execution.id}`,\n  receivedAt: new Date().toISOString(),\n  body: $json.body,\n  attempt: 0,\n  logs: [],\n};\nreturn { json: log(item, 'intake', 'received', { content_type: headers['content-type'] || null }) };\n"
+      },
+      "id": "18573b0e-c0e1-5cb7-aee0-2f88ab77bc61",
+      "name": "Set Context & Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Structured log helper: one JSON line to stdout (visible in n8n logs when\n// CODE_ENABLE_STDOUT=true) and the same entry appended to item.logs so it is\n// also visible in the execution view.\nfunction log(item, step, outcome, extra = {}, level = 'info') {\n  const entry = {\n    ts: new Date().toISOString(),\n    level,\n    workflow: 'order-intake',\n    execution_id: $execution.id,\n    correlation_id: item.correlationId,\n    step,\n    outcome,\n    ...extra,\n  };\n  console.log(JSON.stringify(entry));\n  item.logs = [...(item.logs || []), entry];\n  return item;\n}\n\n// Same contract as python-webhook-reliability-demo (order.created).\nconst b = $json.body;\nconst errors = [];\nconst isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);\nconst str = (v, min = 1, max = 128) => typeof v === 'string' && v.length >= min && v.length <= max;\n\nif (!isObj(b)) {\n  errors.push({ field: 'body', message: 'JSON object expected' });\n} else {\n  if (!str(b.event_id, 8)) errors.push({ field: 'event_id', message: 'string, 8-128 chars' });\n  if (b.event_type !== 'order.created') errors.push({ field: 'event_type', message: \"must be 'order.created'\" });\n  if (!str(b.occurred_at) || Number.isNaN(Date.parse(b.occurred_at))) errors.push({ field: 'occurred_at', message: 'ISO-8601 timestamp' });\n  if (!str(b.order_id, 1, 64)) errors.push({ field: 'order_id', message: 'string, 1-64 chars' });\n  if (typeof b.currency !== 'string' || !/^[A-Z]{3}$/.test(b.currency)) errors.push({ field: 'currency', message: 'ISO-4217 code, e.g. EUR' });\n  if (!isObj(b.customer)) {\n    errors.push({ field: 'customer', message: 'object required' });\n  } else {\n    if (!str(b.customer.id, 1, 64)) errors.push({ field: 'customer.id', message: 'string, 1-64 chars' });\n    if (typeof b.customer.email !== 'string' || !/^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$/.test(b.customer.email)) errors.push({ field: 'customer.email', message: 'valid email' });\n  }\n  if (!Array.isArray(b.lines) || b.lines.length < 1 || b.lines.length > 100) {\n    errors.push({ field: 'lines', message: 'array with 1-100 lines' });\n  } else {\n    b.lines.forEach((l, i) => {\n      if (!isObj(l)) { errors.push({ field: `lines[${i}]`, message: 'object' }); return; }\n      if (!str(l.sku, 1, 64)) errors.push({ field: `lines[${i}].sku`, message: 'string, 1-64 chars' });\n      if (!Number.isInteger(l.quantity) || l.quantity < 1 || l.quantity > 1000) errors.push({ field: `lines[${i}].quantity`, message: 'integer 1-1000' });\n      if (typeof l.unit_price !== 'string' || !/^\\d{1,10}(\\.\\d{1,2})?$/.test(l.unit_price)) errors.push({ field: `lines[${i}].unit_price`, message: \"decimal string, e.g. '12.50'\" });\n    });\n  }\n}\n\nconst item = { ...$json, valid: errors.length === 0, errors };\nif (item.valid) {\n  item.eventId = b.event_id;\n  item.orderId = b.order_id;\n  // Integer cents avoid floating point drift in the total.\n  const cents = b.lines.reduce((sum, l) => sum + Math.round(Number(l.unit_price) * 100) * l.quantity, 0);\n  item.downstreamPayload = {\n    external_order_id: b.order_id,\n    customer_id: b.customer.id,\n    customer_email: b.customer.email,\n    currency: b.currency,\n    total: (cents / 100).toFixed(2),\n    lines: b.lines,\n  };\n  log(item, 'validate', 'ok', { event_id: item.eventId, order_id: item.orderId });\n} else {\n  log(item, 'validate', 'rejected', { error_count: errors.length, fields: errors.map((e) => e.field) }, 'warn');\n}\nreturn { json: item };\n"
+      },
+      "id": "488ae18b-ac27-55fe-8ae7-daacb574b57d",
+      "name": "Validate Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "025b3892-89ae-5373-ac42-b700f2ea26b3",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "2f2d8ee9-8352-52b9-ba32-882265933662",
+      "name": "Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        660,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Structured log helper: one JSON line to stdout (visible in n8n logs when\n// CODE_ENABLE_STDOUT=true) and the same entry appended to item.logs so it is\n// also visible in the execution view.\nfunction log(item, step, outcome, extra = {}, level = 'info') {\n  const entry = {\n    ts: new Date().toISOString(),\n    level,\n    workflow: 'order-intake',\n    execution_id: $execution.id,\n    correlation_id: item.correlationId,\n    step,\n    outcome,\n    ...extra,\n  };\n  console.log(JSON.stringify(entry));\n  item.logs = [...(item.logs || []), entry];\n  return item;\n}\n\nreturn { json: log({ ...$json }, 'respond', 'rejected', { status: 422 }, 'warn') };\n"
+      },
+      "id": "15d25a8c-aa97-587b-bb59-4f64f3106770",
+      "name": "Log: Rejected",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'invalid', correlation_id: $json.correlationId, errors: $json.errors }) }}",
+        "options": {
+          "responseCode": 422,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "X-Correlation-Id",
+                "value": "={{ $json.correlationId }}"
+              }
+            ]
+          }
+        }
+      },
+      "id": "90a1a087-8890-5d29-8294-e98e405d3839",
+      "name": "Respond 422 Invalid",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1100,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'accepted', correlation_id: $json.correlationId, event_id: $json.eventId }) }}",
+        "options": {
+          "responseCode": 202,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "X-Correlation-Id",
+                "value": "={{ $json.correlationId }}"
+              }
+            ]
+          }
+        }
+      },
+      "id": "18f1e0e2-b64a-505b-9752-56e0ea8daea5",
+      "name": "Respond 202 Accepted",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        880,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Structured log helper: one JSON line to stdout (visible in n8n logs when\n// CODE_ENABLE_STDOUT=true) and the same entry appended to item.logs so it is\n// also visible in the execution view.\nfunction log(item, step, outcome, extra = {}, level = 'info') {\n  const entry = {\n    ts: new Date().toISOString(),\n    level,\n    workflow: 'order-intake',\n    execution_id: $execution.id,\n    correlation_id: item.correlationId,\n    step,\n    outcome,\n    ...extra,\n  };\n  console.log(JSON.stringify(entry));\n  item.logs = [...(item.logs || []), entry];\n  return item;\n}\n\n// Entered once from validation and again after every backoff wait.\nconst item = { ...$json, attempt: ($json.attempt || 0) + 1 };\ndelete item.decision;\nreturn { json: log(item, 'deliver', 'attempt', { attempt: item.attempt, max_attempts: item.config.maxAttempts, event_id: item.eventId }) };\n"
+      },
+      "id": "e55e6601-1f94-5076-bb7f-e6487955b4b9",
+      "name": "Prepare Attempt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.config.downstreamUrl }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Idempotency-Key",
+              "value": "={{ $json.eventId }}"
+            },
+            {
+              "name": "X-Correlation-Id",
+              "value": "={{ $json.correlationId }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.downstreamPayload) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "dc4255e1-4030-5074-a505-966bbf6775dc",
+      "name": "HTTP: Deliver to Downstream",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1320,
+        200
+      ],
+      "onError": "continueErrorOutput",
+      "notes": "Retries are handled explicitly by the loop below (exponential backoff with jitter), so the node's built-in fixed-interval retry is off."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Structured log helper: one JSON line to stdout (visible in n8n logs when\n// CODE_ENABLE_STDOUT=true) and the same entry appended to item.logs so it is\n// also visible in the execution view.\nfunction log(item, step, outcome, extra = {}, level = 'info') {\n  const entry = {\n    ts: new Date().toISOString(),\n    level,\n    workflow: 'order-intake',\n    execution_id: $execution.id,\n    correlation_id: item.correlationId,\n    step,\n    outcome,\n    ...extra,\n  };\n  console.log(JSON.stringify(entry));\n  item.logs = [...(item.logs || []), entry];\n  return item;\n}\n\nconst state = { ...$('Prepare Attempt').item.json };\nstate.result = { status: 'delivered', attempts: state.attempt, downstream: $json };\nreturn { json: log(state, 'deliver', 'delivered', { attempt: state.attempt, event_id: state.eventId, order_id: state.orderId }) };\n"
+      },
+      "id": "2ef76afb-6d4d-5707-875b-af0c8afa0806",
+      "name": "Log: Delivered",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Structured log helper: one JSON line to stdout (visible in n8n logs when\n// CODE_ENABLE_STDOUT=true) and the same entry appended to item.logs so it is\n// also visible in the execution view.\nfunction log(item, step, outcome, extra = {}, level = 'info') {\n  const entry = {\n    ts: new Date().toISOString(),\n    level,\n    workflow: 'order-intake',\n    execution_id: $execution.id,\n    correlation_id: item.correlationId,\n    step,\n    outcome,\n    ...extra,\n  };\n  console.log(JSON.stringify(entry));\n  item.logs = [...(item.logs || []), entry];\n  return item;\n}\n\n// The HTTP node's error output only carries the error, so read the state\n// from the paired item of \"Prepare Attempt\".\nconst state = { ...$('Prepare Attempt').item.json };\nconst err = $json.error || {};\nconst text = [err.message, err.description, err.httpCode].filter(Boolean).join(' ');\nconst statusCode = Number(err.httpCode || err.status || err.statusCode || (text.match(/\\b([1-5]\\d\\d)\\b/) || [])[1]) || null;\n\nconst RETRYABLE = new Set([408, 425, 429, 500, 502, 503, 504]);\nconst networkError = statusCode === null; // timeouts, DNS, connection refused\nconst retryable = networkError || RETRYABLE.has(statusCode);\nconst attemptsLeft = state.attempt < state.config.maxAttempts;\n\n// Exponential backoff with \"equal jitter\": half fixed, half random, so a wait is never ~0.\nconst ceiling = Math.min(state.config.backoffMaxSeconds, state.config.backoffBaseSeconds * 2 ** (state.attempt - 1));\nconst waitSeconds = Math.max(1, Math.round((ceiling / 2 + Math.random() * ceiling / 2) * 10) / 10);\n\nstate.lastError = { statusCode, message: String(err.message || 'unknown error').slice(0, 300) };\nstate.decision = { retry: retryable && attemptsLeft, retryable, waitSeconds };\n\nif (state.decision.retry) {\n  log(state, 'deliver', 'retry_scheduled', { attempt: state.attempt, status_code: statusCode, retry_in_seconds: waitSeconds }, 'warn');\n} else {\n  log(state, 'deliver', 'failed', {\n    attempt: state.attempt, status_code: statusCode,\n    reason: retryable ? 'retries_exhausted' : 'permanent_error',\n  }, 'error');\n}\nreturn { json: state };\n"
+      },
+      "id": "9a80edb5-0d61-55a2-a9b4-7be6e06c78de",
+      "name": "Classify Failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "5acebee6-c2c6-534f-83de-42a10aa749c0",
+              "leftValue": "={{ $json.decision.retry }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "2a8720f4-5556-5736-b0e5-d3e505ab95b3",
+      "name": "Retry?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1780,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "amount": "={{ $json.decision.waitSeconds }}",
+        "unit": "seconds"
+      },
+      "id": "931da717-7e93-5e86-9f05-5de3ab69b59a",
+      "name": "Wait: Backoff",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2000,
+        220
+      ],
+      "webhookId": "f4eeb00a-4395-5816-a64a-aa7c0de180df"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Structured log helper: one JSON line to stdout (visible in n8n logs when\n// CODE_ENABLE_STDOUT=true) and the same entry appended to item.logs so it is\n// also visible in the execution view.\nfunction log(item, step, outcome, extra = {}, level = 'info') {\n  const entry = {\n    ts: new Date().toISOString(),\n    level,\n    workflow: 'order-intake',\n    execution_id: $execution.id,\n    correlation_id: item.correlationId,\n    step,\n    outcome,\n    ...extra,\n  };\n  console.log(JSON.stringify(entry));\n  item.logs = [...(item.logs || []), entry];\n  return item;\n}\n\nconst item = { ...$json };\nitem.alert = {\n  text: `Order webhook failed: ${item.orderId} (${item.decision.retryable ? 'retries exhausted' : 'permanent error'})`,\n  details: {\n    workflow: 'order-intake',\n    execution_id: $execution.id,\n    correlation_id: item.correlationId,\n    event_id: item.eventId,\n    order_id: item.orderId,\n    attempts: item.attempt,\n    status_code: item.lastError.statusCode,\n    retryable: item.decision.retryable,\n    error: item.lastError.message,\n    replay_hint: 'Fix the cause, then re-send the original payload to the webhook (same event_id).',\n  },\n};\n// Only references go into the alert: no payload body, no customer email.\nreturn { json: log(item, 'alert', 'sending', { attempts: item.attempt, status_code: item.lastError.statusCode }, 'error') };\n"
+      },
+      "id": "82a76669-fc36-5d11-8c6e-12fd9075c769",
+      "name": "Build Failure Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        440
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.config.alertWebhookUrl }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.alert) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "7a7c2bc5-c26c-57b5-8418-28e4cd636e11",
+      "name": "Alert: Generic Webhook",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2220,
+        360
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "notes": "Works with Slack/Teams incoming webhooks or any endpoint that accepts JSON."
+    },
+    {
+      "parameters": {
+        "fromEmail": "n8n-alerts@example.com",
+        "toEmail": "ops@example.com",
+        "subject": "={{ $json.alert.text }}",
+        "emailFormat": "text",
+        "text": "={{ JSON.stringify($json.alert.details, null, 2) }}",
+        "options": {}
+      },
+      "id": "b2825d13-36ef-5fb0-800f-075650622ff5",
+      "name": "Alert: Email (optional)",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        2220,
+        540
+      ],
+      "disabled": true,
+      "onError": "continueRegularOutput",
+      "notes": "Disabled by default. Add SMTP credentials and enable to get email alerts too."
+    },
+    {
+      "parameters": {
+        "content": "## Production-ready order intake (demo)\nWebhook -> validate -> 202 -> deliver with **exponential backoff + jitter** -> alert on permanent failure.\n\nEdit **Set Context & Config** after import. No secrets live in this workflow.\nSee README and docs/runbook.md.",
+        "height": 200,
+        "width": 420,
+        "color": 4
+      },
+      "id": "ba46cb00-6d5b-5526-97f1-7005fe76d58e",
+      "name": "Sticky: Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook: Order Intake": {
+      "main": [
+        [
+          {
+            "node": "Set Context & Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Context & Config": {
+      "main": [
+        [
+          {
+            "node": "Validate Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Payload": {
+      "main": [
+        [
+          {
+            "node": "Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid?": {
+      "main": [
+        [
+          {
+            "node": "Respond 202 Accepted",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log: Rejected",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log: Rejected": {
+      "main": [
+        [
+          {
+            "node": "Respond 422 Invalid",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond 202 Accepted": {
+      "main": [
+        [
+          {
+            "node": "Prepare Attempt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Attempt": {
+      "main": [
+        [
+          {
+            "node": "HTTP: Deliver to Downstream",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP: Deliver to Downstream": {
+      "main": [
+        [
+          {
+            "node": "Log: Delivered",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Classify Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Failure": {
+      "main": [
+        [
+          {
+            "node": "Retry?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Retry?": {
+      "main": [
+        [
+          {
+            "node": "Wait: Backoff",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Failure Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait: Backoff": {
+      "main": [
+        [
+          {
+            "node": "Prepare Attempt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Failure Alert": {
+      "main": [
+        [
+          {
+            "node": "Alert: Generic Webhook",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Alert: Email (optional)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}

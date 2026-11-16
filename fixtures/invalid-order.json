@@ -1,0 +1,19 @@
+{
+  "event_id": "evt_bad",
+  "event_type": "order.created",
+  "occurred_at": "2026-11-15T10:00:00Z",
+  "order_id": "ORD-1001",
+  "currency": "euro",
+  "lines": [
+    {
+      "sku": "MUG-01",
+      "quantity": 0,
+      "unit_price": "12.50"
+    },
+    {
+      "sku": "TEE-L",
+      "quantity": 1,
+      "unit_price": "20.00"
+    }
+  ]
+}

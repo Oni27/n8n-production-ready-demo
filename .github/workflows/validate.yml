@@ -1,0 +1,43 @@
+name: Validate workflows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check workflow JSON structure
+        run: python tools/validate_workflow.py workflows/*.json
+      - name: Generated files are up to date
+        run: |
+          python tools/build_workflow.py
+          git diff --exit-code workflows/
+      - name: Fixtures are valid JSON
+        run: for f in fixtures/*.json; do python -m json.tool "$f" > /dev/null; done
+
+  import:
+    runs-on: ubuntu-latest
+    needs: static
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Import into a throwaway n8n instance
+        env:
+          N8N_USER_FOLDER: ${{ runner.temp }}/n8n
+          N8N_DIAGNOSTICS_ENABLED: "false"
+        run: |
+          npx --yes n8n@2.47.7 import:workflow --input=workflows/order-intake.json
+          npx --yes n8n@2.47.7 import:workflow --input=workflows/global-error-handler.json
+          npx --yes n8n@2.47.7 list:workflow

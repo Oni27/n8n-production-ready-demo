@@ -1,0 +1,29 @@
+# Local demo stack: n8n + a mock downstream API / alert sink.
+# Tested with n8n 2.47.7. No credentials or secrets are needed.
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:2.47.7
+    ports:
+      - "5678:5678"
+    environment:
+      GENERIC_TIMEZONE: Europe/Sofia
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      CODE_ENABLE_STDOUT: "true"        # Code-node JSON logs go to `docker compose logs n8n`
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./workflows:/workflows:ro
+    depends_on:
+      - mock-api
+
+  mock-api:
+    image: python:3.12-alpine
+    command: ["python", "/mock/mock_api.py"]
+    environment:
+      PORT: "8081"
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./mock:/mock:ro
+
+volumes:
+  n8n_data:

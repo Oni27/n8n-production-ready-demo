@@ -1,0 +1,85 @@
+{
+  "name": "Global Error Handler - demo",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "ce93ab38-54a7-56cc-b90f-ffedd4c73d5a",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Runs when the main workflow fails in a way its own error branch did not catch\n// (for example a bug in a Code node). Sends a short alert with references only.\nconst e = $json.execution || {};\nconst alert = {\n  text: `n8n workflow crashed: ${($json.workflow || {}).name || 'unknown'}`,\n  details: {\n    workflow_id: ($json.workflow || {}).id,\n    execution_id: e.id,\n    execution_url: e.url,\n    last_node: e.lastNodeExecuted,\n    error: String((e.error || {}).message || 'unknown').slice(0, 300),\n  },\n};\nconsole.log(JSON.stringify({ ts: new Date().toISOString(), level: 'error', step: 'global-error-handler', ...alert.details }));\nreturn [{ json: { alert } }];\n"
+      },
+      "id": "28a79718-0769-5e7f-b099-10924d562f76",
+      "name": "Build Crash Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://mock-api:8081/alerts",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.alert) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "83cad6a5-6007-5486-8962-aa7076e443ad",
+      "name": "Alert: Crash Webhook",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Build Crash Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Crash Alert": {
+      "main": [
+        [
+          {
+            "node": "Alert: Crash Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}
